@@ -1923,6 +1923,22 @@ class Handler(http.server.BaseHTTPRequestHandler):
         ip = self.client_address[0]
         return ip in ("127.0.0.1", "::1", "::ffff:127.0.0.1")
 
+    def _site_ok(self):
+        """Reject cross-site requests. Web pages you visit can fire
+        fetch() at 127.0.0.1 — and localhost is otherwise trusted with a
+        real shell behind it. Their requests carry their own Origin (and
+        a Host that must match ours, which also stops DNS rebinding)."""
+        host = (self.headers.get("Host") or "").strip().lower()
+        allowed = {f"127.0.0.1:{PORT}", f"localhost:{PORT}", f"[::1]:{PORT}"}
+        if LAN_URL:
+            allowed.add(urllib.parse.urlparse(LAN_URL).netloc.lower())
+        if host not in allowed:
+            return False
+        origin = (self.headers.get("Origin") or "").strip().lower()
+        if origin and origin != f"http://{host}":
+            return False
+        return True
+
     def _token_ok(self):
         if self._is_local():
             return True
@@ -1960,7 +1976,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
             return {}
 
     def do_GET(self):
-        if not self._token_ok():
+        if not (self._site_ok() and self._token_ok()):
             return self._deny()
         path = urllib.parse.urlparse(self.path).path
 
@@ -2023,7 +2039,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
         self.wfile.flush()
 
     def do_POST(self):
-        if not self._token_ok():
+        if not (self._site_ok() and self._token_ok()):
             return self._deny()
         path = urllib.parse.urlparse(self.path).path
 
