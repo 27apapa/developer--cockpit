@@ -1110,9 +1110,13 @@ function initTerm(){
   window.addEventListener('resize', ()=>{ if(tab==='term') fitTerm(); });
 }
 function utf8b64(str){ return btoa(unescape(encodeURIComponent(str))); }
+// keystrokes ride separate HTTP requests, which the browser may deliver out
+// of order — chain them so bytes reach the pty in the order they were typed
+let sendQ = Promise.resolve();
 function sendBytes(str){
-  fetch('/term/input',{method:'POST',headers:{'Content-Type':'application/json'},
-    body:JSON.stringify({d:utf8b64(str)})}).catch(()=>{});
+  const body = JSON.stringify({d:utf8b64(str)});
+  sendQ = sendQ.then(()=>fetch('/term/input',{method:'POST',
+    headers:{'Content-Type':'application/json'}, body})).catch(()=>{});
 }
 function fitTerm(){
   if(!fitAddon) return;
@@ -1132,16 +1136,13 @@ function connectTermStream(){
   };
   termES.onerror = ()=>{ $('tLamp').className='tlamp'; $('tState').textContent='reconnecting…'; };
 }
-// send a whole line (message box + quick buttons). Claude Code's TUI treats a
-// fast burst of characters as a *paste*, so a trailing "\r" in the SAME write
-// becomes a literal newline in the composer instead of submitting — the message
-// gets typed but never sent. Directly-typed keys work because xterm sends each
-// one separately, so Enter arrives as its own keystroke. Mirror that here: send
-// the text first, then a separate Enter a beat later so it registers as a real
-// submit. 80ms is comfortably outside any paste-detection window.
+// send a whole line (message box + quick buttons). The server types the text
+// and presses Enter as a separate keystroke a beat later — done there so the
+// text/Enter ordering and timing are guaranteed no matter how the browser
+// schedules requests.
 function sendLine(text){
-  sendBytes(text);
-  setTimeout(()=> sendBytes('\r'), 80);
+  fetch('/term/say',{method:'POST',headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({text})}).catch(()=>{});
 }
 function wireTerm(){
   const say=$('sayIn'), sayBtn=$('sayBtn');
@@ -1881,6 +1882,20 @@ class Term:
             except OSError:
                 pass
 
+    def send_line(self, text):
+        """Type a line, then submit it with a separate Enter keystroke.
+        TUIs like Claude Code treat a fast burst of bytes as a paste, so
+        a trailing \\r in the same write becomes a literal newline in the
+        composer — the message is typed but never sent. Writing the text,
+        waiting well past any paste-detection window, then sending Enter
+        on its own makes it register as a real key press. Runs in a
+        thread so the HTTP handler doesn't block."""
+        def run():
+            self.write(text.encode("utf-8"))
+            time.sleep(0.4)
+            self.write(b"\r")
+        threading.Thread(target=run, daemon=True).start()
+
     def resize(self, cols, rows):
         if self.fd is not None and PTY_OK:
             try:
@@ -2049,6 +2064,13 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 TERM.write(base64.b64decode(d))
             except Exception:
                 pass
+            return self._json({"ok": True})
+        if path == "/term/say":
+            text = str(self._read_body().get("text", ""))
+            text = text.replace("\r", " ").replace("\n", " ").strip()
+            if text:
+                TERM.start()
+                TERM.send_line(text)
             return self._json({"ok": True})
         if path == "/term/resize":
             b = self._read_body()
