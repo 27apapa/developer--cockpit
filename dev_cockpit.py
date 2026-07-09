@@ -427,13 +427,13 @@ def claude_activity(files=None, limit=80):
            "plan": [], "health": {}}
     if not d:
         return out
-    files = sorted(glob.glob(os.path.join(d, "*.jsonl")),
-                   key=os.path.getmtime, reverse=True)[:2]
-    out["sessions"] = len(files)
+    logs = sorted(glob.glob(os.path.join(d, "*.jsonl")),
+                  key=os.path.getmtime, reverse=True)[:2]
+    out["sessions"] = len(logs)
 
     # -- pass 1: parse every record --------------------------------------
     records = []
-    for fp in files:
+    for fp in logs:
         for line in tail_lines(fp):
             line = line.strip()
             if not line:
@@ -598,8 +598,8 @@ def claude_activity(files=None, limit=80):
             "secs": _iso_secs(t["start"], t["end"]) if t["done"] else None,
             "actions": t["actions"], "last": t["last"]})
 
-    if files:
-        age = time.time() - os.path.getmtime(files[0])
+    if logs:
+        age = time.time() - os.path.getmtime(logs[0])
         out["active"] = age < 25
         out["ageSec"] = int(age)
         if out["active"]:
