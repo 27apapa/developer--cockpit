@@ -648,7 +648,7 @@ def hooks_watcher():
     """Background thread: watches state transitions and fires notifications."""
     prev_hashes = None
     prev_active = None
-    seen = set()
+    seen = {}          # insertion-ordered, so trimming drops the oldest
     startup = True
     while True:
         try:
@@ -662,7 +662,7 @@ def hooks_watcher():
                 key = (e.get("ts"), e.get("name"), e.get("detail"))
                 if key in seen:
                     continue
-                seen.add(key)
+                seen[key] = True
                 if startup:
                     continue          # don't replay history on launch
                 if e.get("kind") == "err" and h["errors"]:
@@ -672,7 +672,8 @@ def hooks_watcher():
                     notify("Subagent launched",
                            e.get("detail") or "Task started", "Submarine")
             if len(seen) > 5000:
-                seen = set(list(seen)[-2000:])
+                for k in list(seen)[:len(seen) - 2000]:
+                    del seen[k]
 
             # working -> idle transition = Claude Code finished
             if a.get("found"):
