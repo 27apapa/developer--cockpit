@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
 """
-Home Perfect — Live Dev Cockpit (3 tabs)
-========================================
+Dev Cockpit
+===========
 A local dashboard that sits next to Claude Code and updates in real time.
+Run it from any project folder — it watches whatever repo it's started in.
 
 TABS (bottom bar, like a phone app):
   1. Terminal    — a REAL shell running in your repo, in the browser. Run
@@ -31,8 +32,8 @@ Terminal tab loads xterm.js from a CDN, so it needs internet the first time.
 HOW TO RUN
 ----------
 1. Open a NEW terminal tab (keep Claude Code running in its own tab).
-2. cd into your Home Perfect repo folder.
-3. Run:   python3 dev_cockpit.py
+2. cd into your project folder.
+3. Run:   python3 /path/to/dev_cockpit.py
 4. Your browser opens http://127.0.0.1:4321 — pick a tab at the bottom.
 
 Stop with Ctrl+C.
@@ -703,7 +704,7 @@ def hooks_watcher():
 # --------------------------------------------------------------------------
 PAGE = r"""<!doctype html><html lang="en"><head>
 <meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<title>Home Perfect — Dev Cockpit</title>
+<title>Dev Cockpit</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;600;700&family=Inter:wght@400;500;600&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
@@ -1023,7 +1024,7 @@ nav.tabbar button:focus-visible{outline:2px solid var(--amber);outline-offset:2p
   <canvas id="gc"></canvas>
   <div class="goverlay">
     <div>
-      <p class="gt" id="gTitle">Home Perfect</p>
+      <p class="gt" id="gTitle">Dev Cockpit</p>
       <p class="gs" id="gSub">Your app, drawn live from the codebase. Planets drift slowly — click one to zoom into its own galaxy.</p>
     </div>
     <div class="gbtns">
@@ -1460,7 +1461,7 @@ function camDraw(fn, focus, s, alpha){
   gctx.restore();
 }
 function gChrome(){
-  const proj=S?S.project:'Home Perfect';
+  const proj=S?S.project:'Dev Cockpit';
   if(TL){
     $('gTitle').textContent=proj+' — time-lapse';
     $('gSub').textContent='Replaying the app being built, commit by commit. Drag the slider or press play.';
@@ -2104,8 +2105,8 @@ def main():
     ip = lan_ip()
     url = f"http://127.0.0.1:{PORT}"
     LAN_URL = f"http://{ip}:{PORT}/?k={TOKEN}" if ip else None
-    print("\n  Home Perfect — Dev Cockpit")
-    print("  --------------------------")
+    print("\n  Dev Cockpit")
+    print("  -----------")
     print(f"  Watching:    {ROOT}")
     sess = claude_sessions_dir()
     print(f"  Claude Code: {'session log found' if sess else 'no session log yet (start Claude Code here once)'}")
