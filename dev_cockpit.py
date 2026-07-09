@@ -15,9 +15,6 @@ TABS (bottom bar, like a phone app):
   3. Claude Code — EXACTLY what Claude Code is doing right now: every tool
                    call, file edit, bash command, and subagent (Task) launch,
                    read live from Claude Code's own session logs
-  4. Galaxy      — an auto-generated galaxy of YOUR app. Planets drift
-                   slowly; click a feature to zoom into its own sub-galaxy
-                   of files. Fullscreen it and show your friends.
 
 SECURITY
 --------
@@ -57,16 +54,6 @@ Center, even when this window is hidden:
 Toggle them in the Claude Code tab. Notifications use macOS's built-in
 osascript — nothing to install. The first one may ask you to allow
 notifications from "Script Editor" in System Settings.
-
-GALAXY EXTRAS
--------------
-- Infinite zoom: ringed planets are folders — click to dive deeper,
-  level after level, all the way down to single files. Esc / Back /
-  empty-space click goes up one level.
-- Time-lapse: replays your git history; watch the galaxy grow commit
-  by commit with a play button and a scrubber.
-- Build health: after a failing build/test run, the affected feature's
-  planet glows red; it turns green again when the build passes.
 
 PHONE ACCESS
 ------------
@@ -158,65 +145,6 @@ def list_files():
     return files
 
 
-def build_tree(files):
-    """Full project tree: folders all the way down to single files,
-    capped at 12 children per level for readability."""
-    root = {"name": os.path.basename(ROOT) or "project", "dir": True,
-            "count": 0, "children": {}}
-    for f in files:
-        if f in SELF_FILES:
-            continue
-        parts = f.split(os.sep)
-        root["count"] += 1
-        node = root
-        for i, part in enumerate(parts):
-            isdir = i < len(parts) - 1
-            ch = node["children"].setdefault(
-                part, {"name": part, "dir": isdir, "count": 0, "children": {}})
-            ch["count"] += 1
-            ch["dir"] = ch["dir"] or isdir
-            node = ch
-
-    def finalize(n):
-        kids = sorted(n["children"].values(),
-                      key=lambda c: (-c["count"], c["name"]))[:12]
-        return {"name": n["name"], "dir": n["dir"], "count": n["count"],
-                "children": [finalize(k) for k in kids]}
-    return finalize(root)
-
-
-def build_timelapse(max_commits=80):
-    """Galaxy snapshots per commit for the time-lapse scrubber."""
-    if not is_git():
-        return {"commits": []}
-    log = sh(["git", "log", "--reverse", "--pretty=format:%h\x1f%ct\x1f%s"])
-    lines = [ln for ln in log.splitlines() if ln.strip()]
-    if len(lines) > max_commits:
-        step = (len(lines) - 1) / (max_commits - 1)
-        keep = sorted({round(i * step) for i in range(max_commits)})
-        lines = [lines[i] for i in keep]
-    commits = []
-    for line in lines:
-        p = line.split("\x1f")
-        if len(p) != 3:
-            continue
-        h, ct, msg = p
-        files = sh(["git", "ls-tree", "-r", "--name-only", h]).splitlines()
-        folders = Counter()
-        total = 0
-        for f in files:
-            f = f.strip()
-            if not f or f in SELF_FILES:
-                continue
-            total += 1
-            folders[f.split("/")[0]] += 1
-        commits.append({"hash": h, "t": int(ct) if ct.isdigit() else 0,
-                        "msg": msg, "total": total,
-                        "clusters": [{"name": k, "count": v}
-                                     for k, v in folders.most_common(12)]})
-    return {"commits": commits}
-
-
 def build_state():
     git = is_git()
     files = list_files()
@@ -235,9 +163,8 @@ def build_state():
         "branch": "",
         "commits": [],
         "changed": [],
-        "tree": build_tree(files),
         "lanUrl": LAN_URL,
-        "activity": claude_activity(files),
+        "activity": claude_activity(),
     }
 
     if git:
@@ -354,78 +281,11 @@ def _first_text(msg):
     return ""
 
 
-def _top_of(p, file_map):
-    """Top-level folder (or root file name) a path belongs to."""
-    p = short_path(p).replace("\\", "/")
-    if not p:
-        return None
-    if "/" in p:
-        return p.split("/", 1)[0]
-    return file_map.get(os.path.basename(p), p)
-
-
-def compute_health(records, file_map):
-    """Pair each build/test command with its result; failing builds mark
-    the involved top-level folders 'err', a passing build flips them 'ok'."""
-    health, pend, edits = {}, {}, []
-    valid = set(file_map.values())
-    build_re = re.compile(
-        r"(xcodebuild|swift\s+build|swift\s+test|\bbuild\b|\btest\b|pytest|"
-        r"npm\s+run|xcrun)")
-    path_re = re.compile(r"[\w@~/.\\-]+\.[A-Za-z0-9]{1,6}")
-    for r in sorted(records, key=lambda x: x.get("timestamp", "")):
-        c = (r.get("message") or {}).get("content")
-        if r.get("type") == "assistant" and isinstance(c, list):
-            for b in c:
-                if not (isinstance(b, dict) and b.get("type") == "tool_use"):
-                    continue
-                nm, inp = b.get("name"), b.get("input") or {}
-                if nm in ("Edit", "Write", "MultiEdit", "NotebookEdit"):
-                    t = _top_of(inp.get("file_path") or "", file_map)
-                    if t:
-                        edits.append(t)
-                    if b.get("id"):
-                        pend[b["id"]] = {"n": nm,
-                                         "p": inp.get("file_path", "")}
-                elif nm == "Bash" and b.get("id"):
-                    pend[b["id"]] = {"n": "Bash",
-                                     "c": inp.get("command") or ""}
-        elif r.get("type") == "user" and isinstance(c, list):
-            for b in c:
-                if not (isinstance(b, dict)
-                        and b.get("type") == "tool_result"):
-                    continue
-                info = pend.pop(b.get("tool_use_id"), None)
-                if not info:
-                    continue
-                iserr = bool(b.get("is_error"))
-                if info["n"] == "Bash" and build_re.search(info.get("c", "")):
-                    if iserr:
-                        tops = set()
-                        for m in path_re.findall(str(b.get("content"))):
-                            t = _top_of(m, file_map)
-                            if t in valid:
-                                tops.add(t)
-                        if not tops:
-                            tops = set(edits[-6:])
-                        for t in tops:
-                            health[t] = "err"
-                    else:
-                        for k in list(health):
-                            health[k] = "ok"
-                        edits = []
-                elif iserr and info.get("p"):
-                    t = _top_of(info["p"], file_map)
-                    if t:
-                        health[t] = "err"
-    return health
-
-
-def claude_activity(files=None, limit=80):
+def claude_activity(limit=80):
     d = claude_sessions_dir()
     out = {"found": bool(d), "events": [], "active": False,
            "ageSec": None, "sessions": 0, "agents": [], "now": "",
-           "plan": [], "health": {}}
+           "plan": []}
     if not d:
         return out
     logs = sorted(glob.glob(os.path.join(d, "*.jsonl")),
@@ -447,11 +307,6 @@ def claude_activity(files=None, limit=80):
                 continue
             records.append(rec)
     byid = {r["uuid"]: r for r in records if r.get("uuid")}
-    file_map = {}
-    for f in (files or []):
-        parts = f.split(os.sep)
-        file_map.setdefault(os.path.basename(f),
-                            parts[0] if len(parts) > 1 else f)
 
     # -- pass 2: register subagents (Task launches + their results) ------
     tasks, task_by_toolid = [], {}
@@ -590,7 +445,6 @@ def claude_activity(files=None, limit=80):
                                  "status": t.get("status", "pending")}
                                 for t in todos if isinstance(t, dict)][:20]
     out["plan"] = plan
-    out["health"] = compute_health(records, file_map)
 
     # -- subagent summary + "doing right now" line ------------------------
     for t in tasks[-8:]:
@@ -861,18 +715,6 @@ nav.tabbar button:focus-visible{outline:2px solid var(--amber);outline-offset:2p
 .pitem.done{color:var(--dim)}
 .pitem.done .pt{text-decoration:line-through}
 .pitem.done .pi{background:rgba(74,222,128,.15);color:#9df3ba}
-#tlTop{display:flex;align-items:center;gap:10px;padding:4px 8px 4px 4px;
-  border-radius:999px;background:rgba(12,14,26,.6);border:1px solid rgba(255,255,255,.12)}
-#tlTop input[type=range]{accent-color:var(--amber);width:clamp(120px,20vw,260px);cursor:pointer}
-#tlTop #tlCount{font-family:"JetBrains Mono";font-size:11.5px;color:var(--dim);
-  min-width:44px;text-align:center}
-.tlcallout{position:absolute;z-index:7;pointer-events:none;
-  font-family:"Space Grotesk";font-weight:600;font-size:13px;color:#fff;
-  white-space:nowrap;opacity:0;transition:opacity .35s}
-.tlcallout.on{opacity:1}
-.tlcallout .cmsg{display:block;font-family:"Inter";font-weight:400;
-  font-size:11px;color:var(--dim);margin-top:1px;max-width:230px;
-  overflow:hidden;text-overflow:ellipsis}
 .afeed{display:flex;flex-direction:column;gap:2px;max-height:calc(100vh - 300px);
   min-height:200px;overflow:auto}
 .ev{display:flex;gap:10px;align-items:baseline;padding:8px;border-radius:10px}
@@ -892,29 +734,6 @@ nav.tabbar button:focus-visible{outline:2px solid var(--amber);outline-offset:2p
 .ev.say .d2{font-family:"Inter";font-style:italic;color:var(--dim)}
 .ev.new{animation:in .6s ease}
 
-/* ---- tab 3: galaxy ---- */
-#tab-galaxy{position:fixed;inset:0;bottom:0;background:var(--bg)}
-#tab-galaxy canvas{position:absolute;inset:0;display:block}
-.goverlay{position:absolute;top:0;left:0;right:0;padding:20px 24px;
-  display:flex;justify-content:space-between;align-items:flex-start;pointer-events:none;gap:14px}
-.goverlay .gt{font-family:"Space Grotesk";font-weight:700;
-  font-size:clamp(24px,4.5vw,42px);letter-spacing:-.02em;margin:0;line-height:1}
-.goverlay .gs{color:var(--dim);font-size:13px;margin:8px 0 0;max-width:44ch}
-.gbtns{display:flex;gap:8px;pointer-events:auto}
-.gbtns button{font-family:"Space Grotesk";font-weight:600;font-size:12px;
-  color:var(--ink);background:rgba(255,255,255,.06);border:1px solid rgba(255,255,255,.14);
-  padding:8px 14px;border-radius:999px;cursor:pointer;transition:.18s;backdrop-filter:blur(6px)}
-.gbtns button:hover{background:rgba(255,255,255,.13)}
-.gbtns button:focus-visible{outline:2px solid var(--amber);outline-offset:2px}
-#gtip{position:absolute;pointer-events:none;z-index:10;opacity:0;
-  transform:translateY(5px);transition:.15s;max-width:250px;
-  background:rgba(12,14,26,.9);border:1px solid rgba(255,255,255,.15);
-  border-radius:12px;padding:11px 14px;backdrop-filter:blur(12px)}
-#gtip.on{opacity:1;transform:none}
-#gtip .n{font-family:"Space Grotesk";font-weight:700;font-size:15px;margin:0 0 2px;
-  display:flex;align-items:center;gap:8px}
-#gtip .n i{width:9px;height:9px;border-radius:50%;display:inline-block;flex:none}
-#gtip .c{color:var(--dim);font-size:12px;margin:0}
 </style></head><body>
 
 <div class="wrap" id="chrome">
@@ -1019,35 +838,11 @@ nav.tabbar button:focus-visible{outline:2px solid var(--amber);outline-offset:2p
   </section>
 </div>
 
-<!-- TAB 3 : GALAXY (fullscreen layer) -->
-<section id="tab-galaxy" hidden>
-  <canvas id="gc"></canvas>
-  <div class="goverlay">
-    <div>
-      <p class="gt" id="gTitle">Dev Cockpit</p>
-      <p class="gs" id="gSub">Your app, drawn live from the codebase. Planets drift slowly — click one to zoom into its own galaxy.</p>
-    </div>
-    <div class="gbtns">
-      <button id="gBack" hidden>← Back</button>
-      <div id="tlTop" hidden>
-        <button id="tlPlay" title="Play / pause">⏸</button>
-        <input type="range" id="tlRange" min="0" max="0" value="0" step="1">
-        <span id="tlCount"></span>
-      </div>
-      <button id="gTl">Time-lapse</button>
-      <button id="gPause">Pause orbit</button>
-      <button id="gFull">Fullscreen</button>
-    </div>
-  </div>
-  <div class="tlcallout" id="tlCallout"></div>
-  <div id="gtip"><p class="n"><i id="gtc"></i><span id="gtn"></span></p><p class="c" id="gtd"></p></div>
-</section>
 
 <nav class="tabbar" role="tablist">
   <button id="tb-term" class="on" role="tab" aria-selected="true"><span class="ico">▟</span>Terminal</button>
   <button id="tb-cockpit" role="tab" aria-selected="false"><span class="ico">◉</span>Cockpit</button>
   <button id="tb-claude" role="tab" aria-selected="false"><span class="ico">⌘</span>Claude Code</button>
-  <button id="tb-galaxy" role="tab" aria-selected="false"><span class="ico">✦</span>Galaxy</button>
 </nav>
 
 <script>
@@ -1068,7 +863,7 @@ async function tick(){
 tick(); setInterval(tick, 2000);
 
 // ------------------------------------------------------------------- tabs
-const tabs = ['term','cockpit','claude','galaxy'];
+const tabs = ['term','cockpit','claude'];
 tabs.forEach(t=>{
   $('tb-'+t).addEventListener('click', ()=>setTab(t));
 });
@@ -1081,9 +876,6 @@ function setTab(t){
   $('tab-term').hidden    = t!=='term';
   $('tab-cockpit').hidden = t!=='cockpit';
   $('tab-claude').hidden  = t!=='claude';
-  $('tab-galaxy').hidden  = t!=='galaxy';
-  $('chrome').style.display = (t==='galaxy') ? 'none' : '';
-  if(t==='galaxy'){ gResize(); }
   if(t==='term'){ initTerm(); setTimeout(fitTerm, 40); }
 }
 
@@ -1167,13 +959,11 @@ initTerm(); setTimeout(fitTerm, 60);
 function render(){
   if(!S) return;
   $('proj').textContent = S.project;
-  gChrome();
   $('clock').textContent = S.time;
   $('branch').textContent = S.git ? S.branch : 'no git yet';
 
   renderCockpit();
   renderClaude();
-  gData(S.tree || null);
   $('phone').textContent = S.lanUrl ? ('phone: ' + S.lanUrl.replace('http://','')) : '';
   first = false;
 }
@@ -1363,439 +1153,6 @@ $('hkTest').addEventListener('click', ()=>{
   $('hkTest').textContent = 'Sent ✓';
   setTimeout(()=>{ $('hkTest').textContent = 'Send test notification'; }, 1600);
 });
-
-// ------------------------------------------------------------- tab 3: galaxy
-const gcv = $('gc'), gctx = gcv.getContext('2d');
-const PAL = ['#ffb020','#37d6c0','#8a7bff','#4ade80','#ff8a97','#f472b6','#38bdf8','#facc15'];
-let GW=0, GH=0, DPR=Math.min(window.devicePixelRatio||1,2);
-let gStars = [], gT=0, gPlaying=true, gLast=performance.now();
-let gMouse={x:-999,y:-999}, gHot=null, gNodes=[];
-const reduce = matchMedia('(prefers-reduced-motion: reduce)').matches;
-if(reduce) gPlaying=false;
-
-let TABH = 70;
-function gResize(){
-  GW = window.innerWidth; GH = window.innerHeight;
-  const bar = document.querySelector('nav.tabbar');
-  TABH = document.fullscreenElement ? 0 : ((bar && bar.offsetHeight) || 70);
-  gcv.width=GW*DPR; gcv.height=GH*DPR;
-  gcv.style.width=GW+'px'; gcv.style.height=GH+'px';
-  gctx.setTransform(DPR,0,0,DPR,0,0);
-  gStars=[];
-  const n=Math.round((GW*GH)/9000);
-  for(let i=0;i<n;i++) gStars.push({x:Math.random()*GW,y:Math.random()*GH,
-    r:Math.random()*1.3+.2,base:Math.random()*.5+.15,tw:Math.random()*6.28,sp:Math.random()*.9+.2});
-}
-window.addEventListener('resize', ()=>{ if(tab==='galaxy') gResize(); });
-document.addEventListener('fullscreenchange', ()=>{ if(tab==='galaxy') gResize(); });
-
-let gTree=null;          // full project tree from /state
-let gPath=[];            // [] = project root; e.g. ['Views','Components']
-let gTr=null;            // zoom transition {dir, ph, name, focus, did}
-let speedMul=1;          // eases toward ~0 while hovering so clicking is easy
-let TL=null;             // time-lapse state {commits,i,playing,colors,disp,acc}
-
-function gData(tree){
-  gTree=tree||null;
-  if(gPath.length && !nodeAt(gPath)){ gPath=[]; gTr=null; }
-  gChrome();
-}
-function nodeAt(path){
-  let n=gTree; if(!n) return null;
-  for(const nm of path){
-    n=(n.children||[]).find(c=>c.name===nm);
-    if(!n) return null;
-  }
-  return n;
-}
-function colorOfPath(path){
-  let n=gTree, col='#aab6ff';
-  for(const nm of path){
-    const kids=n?(n.children||[]):[];
-    const i=kids.findIndex(c=>c.name===nm);
-    if(i<0) return col;
-    col=PAL[i%PAL.length]; n=kids[i];
-  }
-  return col;
-}
-function gRect(){
-  const top = 88;                                  // title overlay zone
-  const h = Math.max(220, GH - TABH - top - 18);   // usable height
-  return {top, h};
-}
-function gCenter(){ const r=gRect(); return {x:GW*.5, y:r.top + r.h*.5}; }
-function gF(){
-  const r=gRect();
-  // outermost orbit + planet + label is ~375 design units; budget 400 with margin
-  return Math.max(.28, Math.min(GW*.5, r.h*.5)/400);
-}
-
-gcv.addEventListener('pointermove',e=>{gMouse.x=e.clientX;gMouse.y=e.clientY;});
-gcv.addEventListener('pointerleave',()=>{gMouse.x=gMouse.y=-999;});
-$('gPause').addEventListener('click',e=>{
-  gPlaying=!gPlaying; e.target.textContent = gPlaying?'Pause orbit':'Resume orbit';
-});
-$('gFull').addEventListener('click',()=>{
-  const el=$('tab-galaxy');
-  if(document.fullscreenElement) document.exitFullscreen();
-  else if(el.requestFullscreen) el.requestFullscreen();
-});
-
-function hexA(hex,a){
-  hex=hex.replace('#','');
-  const n=parseInt(hex,16);
-  return `rgba(${(n>>16)&255},${(n>>8)&255},${n&255},${a})`;
-}
-function glow(x,y,r,color,a){
-  const g=gctx.createRadialGradient(x,y,0,x,y,r);
-  g.addColorStop(0,hexA(color,a)); g.addColorStop(1,hexA(color,0));
-  gctx.fillStyle=g; gctx.beginPath(); gctx.arc(x,y,r,0,7); gctx.fill();
-}
-
-function lerpPt(a,b,k){ return {x:a.x+(b.x-a.x)*k, y:a.y+(b.y-a.y)*k}; }
-function camDraw(fn, focus, s, alpha){
-  gctx.save();
-  gctx.globalAlpha=Math.max(0,Math.min(1,alpha));
-  gctx.translate(GW/2,GH/2); gctx.scale(s,s); gctx.translate(-focus.x,-focus.y);
-  fn();
-  gctx.restore();
-}
-function gChrome(){
-  const proj=S?S.project:'Dev Cockpit';
-  if(TL){
-    $('gTitle').textContent=proj+' — time-lapse';
-    $('gSub').textContent='Replaying the app being built, commit by commit. Drag the slider or press play.';
-    $('gBack').hidden=true;
-    return;
-  }
-  const node=nodeAt(gPath);
-  if(gPath.length&&node){
-    $('gTitle').textContent=node.name;
-    $('gSub').textContent=[proj].concat(gPath).join(' / ')+' — '+(node.count||0)+' files · ringed planets are folders, click to go deeper';
-  } else {
-    $('gTitle').textContent=proj;
-    $('gSub').textContent='Your app, drawn live from the codebase. Ringed planets are folders — click to zoom in, all the way down to single files.';
-  }
-  $('gBack').hidden=!gPath.length;
-}
-
-function layoutKids(kids){
-  const C=gCenter(), F=gF(), n=kids.length||1;
-  const two=n>6;
-  return kids.map((k,i)=>{
-    const inner=!two||i<6;
-    const ring=two?(inner?185:310):245;
-    const cnt=two?(inner?Math.min(n,6):Math.max(n-6,1)):n;
-    const j=inner?i:i-6;
-    const speed=(.012+(j%3)*.004)*(reduce?0:1)*(inner?1:-1);
-    const a=j*(6.283/cnt)+(inner?-.5:.15)+gT*speed;
-    const cap=k.dir?32:15;
-    const pr=Math.min(cap,(k.dir?11:6)+Math.sqrt(k.count||1)*2.2)*F;
-    return {k,i,x:C.x+Math.cos(a)*ring*F,y:C.y+Math.sin(a)*ring*F,pr};
-  });
-}
-
-function drawSystem(interactive){
-  const node=nodeAt(gPath); if(!node) return;
-  const C=gCenter(), F=gF();
-  const kids=node.children||[];
-  const health=(gPath.length===0&&S&&S.activity&&S.activity.health)||{};
-  gctx.lineWidth=1; gctx.strokeStyle='rgba(160,170,220,.08)';
-  (kids.length>6?[185,310]:[245]).forEach(r=>{gctx.beginPath();gctx.arc(C.x,C.y,r*F,0,7);gctx.stroke();});
-  const pos=layoutKids(kids);
-  pos.forEach(p=>{gctx.strokeStyle='rgba(160,170,220,.11)';gctx.beginPath();gctx.moveTo(C.x,C.y);gctx.lineTo(p.x,p.y);gctx.stroke();});
-  pos.forEach(p=>{
-    const col=PAL[p.i%PAL.length];
-    const st=health[p.k.name];
-    if(st==='err') glow(p.x,p.y,p.pr*3.2,'#ff5a6e',.5);
-    glow(p.x,p.y,p.pr*2.4,col,.42);
-    if(p.k.dir){
-      const g=gctx.createRadialGradient(p.x-3,p.y-3,1,p.x,p.y,p.pr);
-      g.addColorStop(0,'#ffffff');g.addColorStop(.28,col);g.addColorStop(1,hexA(col,.5));
-      gctx.fillStyle=g;gctx.beginPath();gctx.arc(p.x,p.y,p.pr,0,7);gctx.fill();
-      gctx.strokeStyle='rgba(255,255,255,.6)';gctx.lineWidth=1.4;
-      gctx.beginPath();gctx.ellipse(p.x,p.y,p.pr*1.65,p.pr*.52,-.5,0,7);gctx.stroke();
-    } else {
-      gctx.fillStyle=col;gctx.beginPath();gctx.arc(p.x,p.y,p.pr,0,7);gctx.fill();
-      gctx.fillStyle='rgba(255,255,255,.9)';gctx.beginPath();gctx.arc(p.x,p.y,p.pr*.38,0,7);gctx.fill();
-    }
-    if(st==='err'){gctx.strokeStyle='rgba(255,90,110,.95)';gctx.lineWidth=2;gctx.beginPath();gctx.arc(p.x,p.y,p.pr+5*F,0,7);gctx.stroke();}
-    else if(st==='ok'){gctx.strokeStyle='rgba(74,222,128,.55)';gctx.lineWidth=1.4;gctx.beginPath();gctx.arc(p.x,p.y,p.pr+5*F,0,7);gctx.stroke();}
-    const label=p.k.name.length>18?p.k.name.slice(0,17)+'…':p.k.name;
-    gctx.font=p.k.dir?`600 ${13*Math.max(1,F)}px "Space Grotesk", sans-serif`:`500 ${11.5*Math.max(1,F)}px "JetBrains Mono", monospace`;
-    gctx.fillStyle='rgba(235,238,255,.9)';gctx.textAlign='center';
-    gctx.fillText(label,p.x,p.y+p.pr+15*F);
-    if(p.k.dir){
-      gctx.font=`500 ${10.5*Math.max(1,F)}px "Inter", sans-serif`;
-      gctx.fillStyle='rgba(200,205,237,.55)';
-      gctx.fillText((p.k.count||0)+' files',p.x,p.y+p.pr+29*F);
-    }
-    if(interactive){
-      let info=p.k.dir?((p.k.count||0)+' files inside · click to zoom in'):'file';
-      if(st==='err') info+=' · build failing here';
-      else if(st==='ok') info+=' · build passing';
-      gNodes.push({x:p.x,y:p.y,r:Math.max(p.pr+10*F,16*F),color:col,
-        kind:p.k.dir?'dir':'file',name:p.k.name,info});
-    }
-  });
-  const isRoot=gPath.length===0;
-  const coreCol=isRoot?'#aab6ff':colorOfPath(gPath);
-  const pr=(isRoot?20:Math.min(40,16+Math.sqrt(node.count||1)*2.4))*F;
-  glow(C.x,C.y,pr*2.8,coreCol,.6);
-  const cg=gctx.createRadialGradient(C.x-5,C.y-5,2,C.x,C.y,pr);
-  cg.addColorStop(0,'#ffffff');
-  cg.addColorStop(isRoot?.5:.3,isRoot?'#cdd6ff':coreCol);
-  cg.addColorStop(1,hexA(isRoot?'#6f7bff':coreCol,.55));
-  gctx.fillStyle=cg;gctx.beginPath();gctx.arc(C.x,C.y,pr,0,7);gctx.fill();
-  gctx.font=`700 ${(isRoot?14:15)*Math.max(1,F)}px "Space Grotesk", sans-serif`;
-  gctx.fillStyle='#fff';gctx.textAlign='center';
-  gctx.fillText(node.name,C.x,C.y+pr+20*F);
-  gctx.font=`500 ${11*Math.max(1,F)}px "Inter", sans-serif`;
-  gctx.fillStyle='rgba(200,205,237,.6)';
-  gctx.fillText((node.count||0)+' files'+((isRoot&&S&&S.git)?(' · '+S.commits.length+' commits'):''),C.x,C.y+pr+35*F);
-  if(interactive) gNodes.push({x:C.x,y:C.y,r:pr+10*F,color:coreCol,kind:'core',
-    name:node.name,info:(node.count||0)+' files'+(gPath.length?' · click empty space to go up':'')});
-}
-
-function childFocus(name){
-  const node=nodeAt(gPath); if(!node) return gCenter();
-  const p=layoutKids(node.children||[]).find(x=>x.k.name===name);
-  return p?{x:p.x,y:p.y}:gCenter();
-}
-function zoomIn(name,focus){ if(gTr||TL) return; gTr={dir:1,ph:reduce?1:0,name,focus,did:false}; }
-function zoomOut(){
-  if(gTr||TL||!gPath.length) return;
-  const name=gPath[gPath.length-1];
-  const saved=gPath.slice();
-  gPath=gPath.slice(0,-1);
-  const f=childFocus(name);
-  gPath=saved;
-  gTr={dir:-1,ph:reduce?1:0,name,focus:f,did:false};
-}
-
-gcv.addEventListener('click', e=>{
-  gMouse.x=e.clientX; gMouse.y=e.clientY;      // makes taps work on touch too
-  if(gTr||TL) return;
-  let hit=null;
-  for(let i=gNodes.length-1;i>=0;i--){
-    const n=gNodes[i];
-    if((e.clientX-n.x)**2+(e.clientY-n.y)**2<=n.r*n.r){hit=n;break;}
-  }
-  if(hit&&hit.kind==='dir'){ zoomIn(hit.name,{x:hit.x,y:hit.y}); }
-  else if(!hit&&gPath.length){ zoomOut(); }
-});
-$('gBack').addEventListener('click', zoomOut);
-document.addEventListener('keydown', e=>{
-  if(e.key==='Escape'&&tab==='galaxy'){ if(TL) tlExit(); else zoomOut(); }
-});
-
-// ---- time-lapse ----------------------------------------------------------
-$('gTl').addEventListener('click', async ()=>{
-  if(TL){ tlExit(); return; }
-  $('gTl').textContent='Loading…';
-  try{
-    const r=await fetch('/timelapse',{cache:'no-store'});
-    const j=await r.json();
-    const commits=j.commits||[];
-    if(!commits.length){ $('gTl').textContent='Time-lapse'; return; }
-    const colors={};
-    commits.forEach(c=>(c.clusters||[]).forEach(cl=>{
-      if(!(cl.name in colors)) colors[cl.name]=PAL[Object.keys(colors).length%PAL.length];
-    }));
-    TL={commits,i:0,playing:true,colors,disp:{},acc:0,
-        callout:null,calloutUntil:0};
-    gPath=[]; gTr=null;
-    $('tlTop').hidden=false;
-    $('tlRange').max=commits.length-1; $('tlRange').value=0;
-    $('tlPlay').textContent='⏸'; $('gTl').textContent='Exit';
-    tlLabel(); gChrome();
-  }catch(err){ $('gTl').textContent='Time-lapse'; }
-});
-function tlExit(){
-  TL=null; $('tlTop').hidden=true; $('gTl').textContent='Time-lapse';
-  $('tlCallout').classList.remove('on'); gChrome();
-}
-$('tlPlay').addEventListener('click', ()=>{
-  if(!TL) return;
-  TL.playing=!TL.playing; $('tlPlay').textContent=TL.playing?'⏸':'▶';
-});
-$('tlRange').addEventListener('input', e=>{
-  if(!TL) return;
-  TL.playing=false; $('tlPlay').textContent='▶';
-  const to=+e.target.value;
-  TL.i=to; TL.acc=0; tlLabel();
-});
-function tlLabel(){
-  const c=TL.commits[TL.i];
-  $('tlCount').textContent=(TL.i+1)+'/'+TL.commits.length;
-  // arm a callout for whatever folder this commit introduces (if any)
-  const prev = TL.i>0 ? new Set((TL.commits[TL.i-1].clusters||[]).map(x=>x.name)) : new Set();
-  const added = (c.clusters||[]).map(x=>x.name).filter(n=>!prev.has(n));
-  TL.callout = {msg:c.msg, when:c.t?new Date(c.t*1000).toLocaleDateString():'',
-                names:added};
-  TL.calloutUntil = performance.now()/1000 + 2.6;
-}
-
-function drawTimelapse(dt){
-  if(TL.playing){
-    TL.acc+=dt;
-    if(TL.acc>2.0){                       // ~2s per commit so each lands visibly
-      TL.acc=0;
-      if(TL.i<TL.commits.length-1){ TL.i++; $('tlRange').value=TL.i; tlLabel(); }
-      else { TL.playing=false; $('tlPlay').textContent='▶'; }
-    }
-  }
-  const snap=TL.commits[TL.i];
-  const target={};
-  (snap.clusters||[]).forEach(c=>target[c.name]=c.count);
-  Object.keys(TL.disp).forEach(n=>{ if(!(n in target)) target[n]=0; });
-  Object.keys(target).forEach(n=>{
-    const cur=TL.disp[n]==null?0:TL.disp[n];
-    const v=cur+(target[n]-cur)*Math.min(1,dt*2.4);   // gentler grow-in
-    if(v<.4&&target[n]===0) delete TL.disp[n]; else TL.disp[n]=v;
-  });
-  const kids=Object.entries(TL.disp).map(([name,count])=>({name,count,dir:true}))
-    .sort((a,b)=>b.count-a.count).slice(0,12);
-  const C=gCenter(), F=gF();
-  gctx.lineWidth=1; gctx.strokeStyle='rgba(160,170,220,.08)';
-  (kids.length>6?[185,310]:[245]).forEach(r=>{gctx.beginPath();gctx.arc(C.x,C.y,r*F,0,7);gctx.stroke();});
-  const pos=layoutKids(kids);
-  pos.forEach(p=>{gctx.strokeStyle='rgba(160,170,220,.11)';gctx.beginPath();gctx.moveTo(C.x,C.y);gctx.lineTo(p.x,p.y);gctx.stroke();});
-  const spots={};
-  pos.forEach(p=>{
-    const col=TL.colors[p.k.name]||PAL[p.i%PAL.length];
-    glow(p.x,p.y,p.pr*2.4,col,.42);
-    const g=gctx.createRadialGradient(p.x-3,p.y-3,1,p.x,p.y,p.pr);
-    g.addColorStop(0,'#ffffff');g.addColorStop(.28,col);g.addColorStop(1,hexA(col,.5));
-    gctx.fillStyle=g;gctx.beginPath();gctx.arc(p.x,p.y,p.pr,0,7);gctx.fill();
-    gctx.font=`600 ${12.5*Math.max(1,F)}px "Space Grotesk", sans-serif`;
-    gctx.fillStyle='rgba(235,238,255,.9)';gctx.textAlign='center';
-    gctx.fillText(p.k.name,p.x,p.y+p.pr+15*F);
-    spots[p.k.name]={x:p.x,y:p.y,pr:p.pr};
-    gNodes.push({x:p.x,y:p.y,r:Math.max(p.pr+10*F,16*F),color:col,kind:'file',
-      name:p.k.name,info:Math.round(p.k.count)+' file'+(Math.round(p.k.count)===1?'':'s')+' at this commit'});
-  });
-  glow(C.x,C.y,56*F,'#aab6ff',.6);
-  const cg=gctx.createRadialGradient(C.x-6,C.y-6,2,C.x,C.y,22*F);
-  cg.addColorStop(0,'#ffffff');cg.addColorStop(.5,'#cdd6ff');cg.addColorStop(1,'#6f7bff');
-  gctx.fillStyle=cg;gctx.beginPath();gctx.arc(C.x,C.y,20*F,0,7);gctx.fill();
-  gctx.font=`700 ${14*Math.max(1,F)}px "Space Grotesk", sans-serif`;
-  gctx.fillStyle='#fff';gctx.textAlign='center';
-  gctx.fillText(S?S.project:'',C.x,C.y+40*F);
-  gctx.font=`500 ${11*Math.max(1,F)}px "Inter", sans-serif`;
-  gctx.fillStyle='rgba(200,205,237,.6)';
-  gctx.fillText((snap.total||0)+' files',C.x,C.y+55*F);
-
-  drawCallout(spots, C, F);
-}
-
-function drawCallout(spots, C, F){
-  const el=$('tlCallout');
-  const co=TL.callout;
-  const nowS=performance.now()/1000;
-  if(!co || nowS>TL.calloutUntil){ el.classList.remove('on'); return; }
-  // anchor to the first newly-added planet that's on screen; else the core
-  let anchor=null;
-  for(const n of (co.names||[])){ if(spots[n]){ anchor=spots[n]; break; } }
-  const a = anchor || {x:C.x, y:C.y, pr:22*F};
-  // draw a short dash from the planet outward
-  const up = a.y > GH*0.5 ? -1 : 1;
-  const x1=a.x, y1=a.y - up*(a.pr+6*F);
-  const x2=a.x, y2=a.y - up*(a.pr+40*F);
-  gctx.strokeStyle='rgba(255,255,255,.7)'; gctx.lineWidth=1.3;
-  gctx.setLineDash([4,4]);
-  gctx.beginPath(); gctx.moveTo(x1,y1); gctx.lineTo(x2,y2); gctx.stroke();
-  gctx.setLineDash([]);
-  gctx.fillStyle='rgba(255,255,255,.9)';
-  gctx.beginPath(); gctx.arc(x2,y2,2.4,0,7); gctx.fill();
-  // place the HTML label near the dash end
-  const label = (co.names && co.names.length)
-    ? ('+ ' + co.names[0] + (co.names.length>1 ? ' +'+(co.names.length-1)+' more' : ''))
-    : co.msg;
-  el.innerHTML = esc(label) + '<span class="cmsg">'+esc(co.msg)+'</span>';
-  let lx=x2+8, ly=(up<0)? (y2-8) : (y2+8);
-  el.style.left=Math.min(GW-240, Math.max(12,lx))+'px';
-  el.style.top=Math.max(96, ly)+'px';
-  el.classList.add('on');
-}
-
-function hitAndTip(){
-  gHot=null;
-  for(let i=gNodes.length-1;i>=0;i--){
-    const n=gNodes[i];
-    if((gMouse.x-n.x)**2+(gMouse.y-n.y)**2<=n.r*n.r){gHot=n;break;}
-  }
-  const tip=$('gtip');
-  if(gHot){
-    gctx.strokeStyle=hexA(gHot.color,.9); gctx.lineWidth=2;
-    gctx.beginPath(); gctx.arc(gHot.x,gHot.y,gHot.r*.72,0,7); gctx.stroke();
-    gcv.style.cursor = gHot.kind==='dir' ? 'pointer' : 'default';
-    tip.classList.add('on');
-    $('gtc').style.background=gHot.color;
-    $('gtn').textContent=gHot.name;
-    $('gtd').textContent=gHot.info;
-    let x=gHot.x+20,y=gHot.y-8;
-    if(x+260>GW-10)x=gHot.x-270;
-    if(y+80>GH-10)y=GH-90; if(y<10)y=10;
-    tip.style.left=x+'px'; tip.style.top=y+'px';
-  } else {
-    gcv.style.cursor='default';
-    tip.classList.remove('on');
-  }
-}
-
-function gFrame(now){
-  requestAnimationFrame(gFrame);
-  if(tab!=='galaxy') return;             // don't burn CPU when hidden
-  const dt=Math.min((now-gLast)/1000,.05); gLast=now;
-  const sT=now/1000;
-  const tgt=(gHot||gTr)?.12:1;           // ease to near-freeze while hovering
-  speedMul += (tgt-speedMul)*Math.min(1,dt*6);
-  if(gPlaying && !gTr) gT += dt*speedMul;
-  gctx.clearRect(0,0,GW,GH);
-
-  for(const s of gStars){
-    const tw=reduce?s.base:s.base+Math.sin(sT*s.sp+s.tw)*.22;
-    gctx.fillStyle=`rgba(210,220,255,${Math.max(0,tw)})`;
-    gctx.beginPath(); gctx.arc(s.x,s.y,s.r,0,7); gctx.fill();
-  }
-
-  gNodes=[];
-  const C=gCenter();
-
-  if(TL){ drawTimelapse(dt); hitAndTip(); return; }
-
-  if(gTr){
-    gTr.ph=Math.min(1,gTr.ph+dt*1.7);
-    const ph=gTr.ph;
-    if(gTr.dir===1){
-      if(ph<.5){
-        const k=ph*2;
-        camDraw(()=>drawSystem(false), lerpPt(C,gTr.focus,k), 1+1.8*k, 1-k);
-      } else {
-        if(!gTr.did){ gPath.push(gTr.name); gTr.did=true; gChrome(); }
-        const k=(ph-.5)*2;
-        camDraw(()=>drawSystem(false), C, .6+.4*k, k);
-      }
-    } else {
-      if(ph<.5){
-        const k=ph*2;
-        camDraw(()=>drawSystem(false), C, 1-.4*k, 1-k);
-      } else {
-        if(!gTr.did){ gPath.pop(); gTr.did=true; gChrome(); }
-        const k=(ph-.5)*2;
-        camDraw(()=>drawSystem(false), lerpPt(gTr.focus,C,k), 2.8-1.8*k, k);
-      }
-    }
-    if(ph>=1){ gTr=null; }
-    gHot=null; $('gtip').classList.remove('on'); gcv.style.cursor='default';
-    return;
-  }
-
-  drawSystem(true);
-  hitAndTip();
-}
-requestAnimationFrame(gFrame);
 </script>
 </body></html>"""
 
@@ -2001,8 +1358,6 @@ class Handler(http.server.BaseHTTPRequestHandler):
             return self._term_stream()
         if self.path.startswith("/state"):
             return self._json(build_state())
-        if self.path.startswith("/timelapse"):
-            return self._json(build_timelapse())
         if self.path.startswith("/hooks/test"):
             notify("Cockpit hooks are live",
                    "This is what a hook notification looks like.", "Glass")
@@ -2130,7 +1485,7 @@ def main():
             pass
     print("  SECURITY:    the Terminal tab is a real shell on this Mac. Keep the")
     print("               phone link private — anyone with it can run commands here.")
-    print("  Tabs:        Terminal · Cockpit · Claude Code · Galaxy")
+    print("  Tabs:        Terminal · Cockpit · Claude Code")
     print("  Stop with Ctrl+C.\n")
     threading.Thread(target=hooks_watcher, daemon=True).start()
     threading.Timer(0.8, lambda: webbrowser.open(url)).start()

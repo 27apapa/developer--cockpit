@@ -5,16 +5,15 @@ A single-file, zero-dependency local dashboard that sits next to
 repo and it shows you — live, in the browser, and on your phone — what your
 project and your AI agent are doing right now.
 
-![tabs](https://img.shields.io/badge/tabs-Terminal%20·%20Cockpit%20·%20Claude%20Code%20·%20Galaxy-ffb020)
+![tabs](https://img.shields.io/badge/tabs-Terminal%20·%20Cockpit%20·%20Claude%20Code-ffb020)
 
-## The four tabs
+## The three tabs
 
 | Tab | What it shows |
 |---|---|
 | **Terminal** | A *real* shell running in your repo, streamed to the browser via a pty + xterm.js. Run `claude` inside it and it's the genuine interactive session — use the message box to send it a prompt while it works, even from your phone. |
 | **Cockpit** | Commits streaming in as they land, files being edited right now, project structure, and an optional embedded live preview of your running app. |
 | **Claude Code** | Exactly what Claude Code is doing, read live from its own session transcripts in `~/.claude/projects`: every tool call, file edit, bash command, subagent launch, its current plan, and desktop-notification hooks (errors, task finished, new commits, subagent launches). |
-| **Galaxy** | Your codebase drawn as a galaxy. Folders are ringed planets — click to zoom in, level after level, down to single files. Includes a git time-lapse (watch the app grow commit by commit) and build health (a failing build makes the affected planet glow red). |
 
 ## Run it
 
